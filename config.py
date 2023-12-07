@@ -6,7 +6,7 @@ import numpy as np
 from isaac_stage.utils import open_stage, save_stage
 from isaac_stage.appliers import apply_appliers, apply_default_dirt_texture, apply_default_ground_physics_material, apply_color_to_prim
 from isaac_stage.prims import create_sphere, create_triangle, create_scope, get_pose, delete, is_defined
-from isaac_stage.terrain import Terrain, RoadsTerrain
+from isaac_stage.terrain import Terrain, PathsTerrain
 from isaac_stage.assets import Asset, AssetManager
 from isaac_stage.stage_builder import StageBuilder, ForestStageBuilder
 
@@ -19,7 +19,7 @@ class SimConfig:
     # Robot specs (comments are what I get from orbit bounding box)
     robot_length= 1.0 # 1.05
     robot_width= 0.6 # .67
-    robot_height= 0.7 # .92 - maybe this one is just robot height without the legs?
+    robot_height= 0.7 # .7 - maybe this one is just robot height without the legs?
 
     # Traversability estimation params      # NOTE : Default Values
     traversability_radius= 5*5.0 # meters     # 5.0m
@@ -83,47 +83,46 @@ class SimConfig:
     env_x = 80
     env_y = 80
     look_ahead = 10
-    robot_max_velocity= 0.5
     draw_markers = '' # '' for no markers, 'sparse' for just the current path, or 'dense' for the whole graph
     max_resets = 20 # number of resets to perform before shutdown. None to run forever
     input_keyboard_mapping = {
             # forward command
-            "W": [robot_max_velocity, 0.0, 0.0],
-            "UP": [robot_max_velocity, 0.0, 0.0],
+            "W": [1.25, 0.0, 0.0],
+            "UP": [1.25, 0.0, 0.0],
             # back command
-            "S": [-robot_max_velocity, 0.0, 0.0],
-            "DOWN": [-robot_max_velocity, 0.0, 0.0],
+            "S": [-1.0, 0.0, 0.0],
+            "DOWN": [-1.0, 0.0, 0.0],
             # left command
-            "D": [0.0, -robot_max_velocity, 0.0],
-            "RIGHT": [0.0, -robot_max_velocity, 0.0],
+            "D": [0.0, -1.0, 0.0],
+            "RIGHT": [0.0, -1.0, 0.0],
             # right command
-            "A": [0.0, robot_max_velocity, 0.0],
-            "LEFT": [0.0, robot_max_velocity, 0.0],
+            "A": [0.0, 1.0, 0.0],
+            "LEFT": [0.0, 1.0, 0.0],
             # yaw command (positive)
-            "NUMPAD_7": [0.0, 0.0, robot_max_velocity],
-            "N": [0.0, 0.0, robot_max_velocity],
+            "NUMPAD_7": [0.0, 0.0, 1.0],
+            "N": [0.0, 0.0, 1.0],
             # yaw command (negative)
-            "NUMPAD_9": [0.0, 0.0, -robot_max_velocity],
-            "M": [0.0, 0.0, -robot_max_velocity],
+            "NUMPAD_9": [0.0, 0.0, -1.0],
+            "M": [0.0, 0.0, -1.0],
         }
 
 class StageConfig:
     #----------------------#
     #   stage parameters   #
     #----------------------#
-    default_stage : Optional[str] = '/home/pcgta/Documents/cs6670finalproject/anymalrunner/stages/Hintze_Hall.usd'
+    default_stage : Optional[str] =  "/home/sean/Desktop/Lincolns_Inn_Chapel_Undercroft.usd"
 
     xdim : int = 100 # NOTE: Has some relationship with env_x and env_y from the StaticParams
     ydim : int = 100
     #terrain_unit : float = 4
 
     asset_density : float = 0.75
-    spawn_assets : bool = True
+    spawn_assets : bool = False
 
     #------------------------#
     #   terrain generation   #
     #------------------------#
-    terrain : Terrain = RoadsTerrain(terrain_unit=1, xdim=xdim, ydim=ydim, amp=0.1, spawn_radius=3,road_min_width=1
+    terrain : Terrain = PathsTerrain(terrain_unit=1, xdim=xdim, ydim=ydim, amp=0.1, spawn_radius=3,road_min_width=1
                             ,road_max_width=3, road_num=15, border_threshold=7, border_height=2.0, bowl_amplitude=5
                             ,applier=apply_appliers([apply_default_ground_physics_material, apply_default_dirt_texture]))
 
@@ -134,10 +133,11 @@ class StageConfig:
 
     # asset registration
     if spawn_assets:
+        ()
         # FOREST ASSETS
         #asset_manager.register("./assets/forest/grass",recurse=False,asset_scale=0.035,applier=None)
         #asset_manager.register("./assets/forest/trees",recurse=False,asset_scale=0.0285,area_factor=0.6,applier=apply_default_ground_physics_material)
-        asset_manager.register("./assets/forest/rocks/Rock_Stone_11_RAWscan.usdz",asset_scale=0.035, area_factor=1.0,applier=apply_default_ground_physics_material)
+        #asset_manager.register("./assets/forest/rocks/Rock_Stone_11_RAWscan.usdz",asset_scale=0.035, area_factor=1.0,applier=apply_default_ground_physics_material)
         #asset_manager.register
     
     #-------------------#

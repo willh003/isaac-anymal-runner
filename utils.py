@@ -69,13 +69,13 @@ def apply_trav_overlay(img, trav):
     output = cv2.addWeighted(img_np.astype(np.uint8), 0.7, color_map, 0.3, 0)
     return output
 
-def unique_log_dir(log_dir):
-    i=0
-    if not os.path.exists(log_dir):
-        os.mkdir(log_dir)
-    while os.path.exists(os.path.join(log_dir, f'test_{i}')):
-        i+=1
-    return os.path.join(log_dir, f'test_{i}')
+# def unique_log_dir(log_dir):
+#     i=0
+#     if not os.path.exists(log_dir):
+#         os.mkdir(log_dir)
+#     while os.path.exists(os.path.join(log_dir, f'test_{i}')):
+#         i+=1
+#     return os.path.join(log_dir, f'test_{i}')
 
 def get_concat_h(im1, im2):
     '''

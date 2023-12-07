@@ -24,9 +24,6 @@ import omni.appwindow  # Contains handle to keyboard
 import os
 import dataclasses
 import numpy as np
-import torch
-import torch.nn.functional as F
-import torchvision.transforms
 from PIL import Image
 import cv2
 import carb
@@ -46,9 +43,6 @@ from ws_isaac_planner.planner import PlanningAgent
 from states import RobotState, LearningState
 from config import SimConfig, StageConfig, DebugConfig
 from utils import *
-
-from bc_trav.model_factories import trav_prior_factory, bc_factory
-from kornia.geometry.camera.pinhole import PinholeCamera
 
 
 class AnymalRunner(object):
@@ -85,7 +79,7 @@ class AnymalRunner(object):
 
     def define_fields(self):
         self._base_command = np.array([0.0,0.0,0])
-        self.log_dir = unique_log_dir(SimConfig.log_dir)
+        # self.log_dir = unique_log_dir(SimConfig.log_dir)
         self.lock = 0
         self.reset_count = 0
                 
@@ -97,18 +91,8 @@ class AnymalRunner(object):
         
         self.planner.random_new_goal()
 
-        # Inference modules
-        self.model_image_size=(224,224)
-        #checkpoint='/home/pcgta/Documents/playground/bc_trav/bc_trav/trav_checkpoints/fastervit-epoch=59-step=125880-b=8-lr=6e-04.ckpt'
-        checkpoint='/home/pcgta/Documents/playground/bc_trav/bc_trav/trav_checkpoints/best_traversability.ckpt'
-        self.model = trav_prior_factory(checkpoint, self.model_image_size)
-        self.action_model = bc_factory('/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/tuned_fastervit.yaml',
-                                       '/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/bc_train.yaml', 
-                                       checkpoint,)
-        self.cur_image = None
-
         # Data collection
-        self.recording = False
+        self.recording = True
 
     def spawn_anymal(self):
         # spawn anymal
@@ -186,45 +170,8 @@ class AnymalRunner(object):
                 pose = self.robot_state.get_xyt_pose()
                 self.planner.calculate_path(pose)
 
-    def logging_callback(self, step_size):
 
-        if self._world.current_time_step_index % SimConfig.image_callback_rate != 0 or self.lock > 0:
-                return
-            
-        self._anymal_direct.front_depth_camera.buffer()
-        self._anymal_direct.front_depth_camera.save_latest_data()
-        image = self._anymal_direct.front_depth_camera.data.output
-        rgb_image = image['rgb'] 
-        depth = image['distance_to_camera']
-
-        torch_image = torch.from_numpy(rgb_image).float().to(SimConfig.device)
-        torch_image = torch_image.permute(2, 0, 1)[:3] # change to channel first: (3, n, m)
-        torch_depth = torch.from_numpy(depth)[None].to(SimConfig.device)
-
-
-        camera_parent = 'wide_angle_camera_front_camera'
-        T_PIW = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}"), ordering="wxyz").to(SimConfig.device)
-        T_CIP = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}/Camera"), ordering="wxyz").to(SimConfig.device)
-        T_CIW = T_PIW @ T_CIP @ torch.Tensor([[-1,0,0,0],[0,1,0,0],[0,0,-1,0],[0,0,0,1]]).to(device='cuda') 
- 
-        self.log_data(img = rgb_image[:,:,:3], depth = torch_depth, pose_cam_in_world=T_CIW)
-
-        self.cur_image = rgb_image
-
-    __image_inference_callback_counter = 0
-
-    def image_inference_callback(self, step_size):
-        if self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
-            return
-        
-        self._anymal_direct.front_depth_camera.buffer()
-        self._anymal_direct.front_depth_camera.save_latest_data()
-        image = self._anymal_direct.front_depth_camera.data.output
-        rgb_image = image['rgb'] 
-        theta = self.action_model(rgb_image)
-        self._base_command = np.array([1, 0, theta])
-
-
+    __save_image_callback_counter = 0
     def save_image_callback(self, step_size):
         if not self.recording or self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
             return
@@ -236,130 +183,29 @@ class AnymalRunner(object):
         
         img = self.clean_image_for_model(rgb_image)
 
-        cu_img = img.cuda()[None]
-        probs = self.model(cu_img)
-        pred = torch.argmax(probs[0], dim=0).cpu()
+        live_preview_img = img.permute(1,2,0)
+        live_preview_img = torch.flip(live_preview_img, dims=[2])
+        live_preview_img = live_preview_img.cpu().numpy() * 255
+        cv2.imwrite("live.jpg", live_preview_img)
 
-        save_mask(img, pred)
-
-        rgbt = torch.zeros((224,224,4))
-        rgbt[:,:,:3] = img.permute(1,2,0)
-        rgbt[:,:, 3] = pred
+        rgb = torch.zeros((224,224,3))
+        rgb[:,:,:3] = img.permute(1,2,0)
 
         # Save Result
-        num = self.__image_inference_callback_counter; 
-        self.__image_inference_callback_counter+=1
+        num = self.__save_image_callback_counter; 
+        self.__save_image_callback_counter+=1
         cmd = F"{self._base_command[0]},{self._base_command[1]},{self._base_command[2]}"
 
-        if StageConfig.default_stage != None:
-            stage_name = StageConfig.default_stage.split("/")[-1]
+        if not os.path.exists("image_command"):
+            os.mkdir("image_command")
+        
+        if StageConfig.default_stage:
+            stage_name = StageConfig.default_stage.split("/")[-1].split(".")[0]
             if not os.path.exists(F"image_command/{stage_name}"):
                 os.mkdir(F"image_command/{stage_name}")
-        torch.save(rgbt.detach(),F"image_command/{stage_name}/{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
-
-        print('Inference complete')
-
-
-    def image_and_proprio_callback(self, step_size):
-        """Processes image"""
-        self.last_image_ts = self._world.current_time_step_index
-
-        camera_parent = 'wide_angle_camera_front_camera'
-        use_for_training = True
-
-        if self._world.current_time_step_index % SimConfig.image_callback_rate != 0 or self.lock > 0:
-            return
-        
-        self._anymal_direct.front_depth_camera.buffer()
-        self._anymal_direct.front_depth_camera.save_latest_data()
-        image = self._anymal_direct.front_depth_camera.data.output
-        rgb_image = image['rgb'] 
-        #depth = image['distance_to_camera']
-
-        torch_image = torch.from_numpy(rgb_image).float().to(SimConfig.device)
-        torch_image = torch_image.permute(2, 0, 1)[:3] # change to channel first: (3, n, m)
-        torch_image_normalized = torch_image / 255.0
-        #torch_depth = torch.from_numpy(depth)[None].to(SimConfig.device)
-
-        # Get the intrinsics matrix and modify it according to crop/interpolations that will be performed 
-        K = self._anymal_direct.front_depth_camera.K.clone()
-        
-        torch_image_resized, intrinsics = crop_and_interpolate(torch_image_normalized, SimConfig.network_input_image_height, SimConfig.network_input_image_width, K)
-        #torch_depth_resized, _ = crop_and_interpolate(torch_depth, SimConfig.network_input_image_height, SimConfig.network_input_image_width, torch.eye(4,4)) # not using K here
-        intrinsics = intrinsics.unsqueeze(0).to(SimConfig.device)
-
-        # Get Poses
-        pose_base_in_world = transformation_matrix_of_pose(get_pose(self.anymal_prim_path + "/base"), ordering="xyzw").to(SimConfig.device)
-        T_PIW = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}"), ordering="wxyz").to(SimConfig.device)
-        T_CIP = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}/Camera"), ordering="wxyz").to(SimConfig.device)
-        T_CIW = T_PIW @ T_CIP @ torch.Tensor([[-1,0,0,0],[0,1,0,0],[0,0,-1,0],[0,0,0,1]]).to(device='cuda') 
- 
-        H = torch.IntTensor([SimConfig.network_input_image_height]).to(SimConfig.device)
-        W = torch.IntTensor([SimConfig.network_input_image_width]).to(SimConfig.device)
-
-
-    def log_data(self, **kwargs):
-        '''
-        Logs data from image_callback, according to SimConfig.logging_rate.
-
-        kwargs:
-            img: image to log
-
-            masked_conf: confidence masked over image
-
-            masked_trav: traversability masked over image
-
-            pose_cam_in_world: torch.tensor, saved as .pt
-
-            depth: torch.tensor, save as .pt
-
-            depth_np: numpy array, save as .png
-        '''
-        if 'masked_trav' in kwargs:
-            masked_trav = kwargs.get('masked_trav')
-        if 'masked_conf' in kwargs:
-            masked_conf = kwargs.get('masked_conf')
-
-        if 'masked_conf' in kwargs and 'masked_trav' in kwargs:
-            im1 = Image.fromarray(masked_trav)
-            im2 =Image.fromarray(masked_conf) 
-            both = get_concat_h(im1, im2)
-            both.save(f'live.jpg') # show real time masked traversability
-
-        if (self._world.current_time_step_index // SimConfig.image_callback_rate) % SimConfig.logging_rate != 0:
-            return
-    
-        i = self._world.current_time_step_index // SimConfig.image_callback_rate
-        relative_path = os.path.join(os.getcwd(),self.log_dir)
-
-        if not os.path.exists(relative_path):
-            print('making dir')
-            os.mkdir(relative_path)
-        print(relative_path)
-        if 'img' in kwargs:
-            ground_truth = Image.fromarray(kwargs.get('img'))
-            ground_truth.save(os.path.join(relative_path, f'img_{i}.jpg')) 
-        if 'masked_conf' in kwargs and 'masked_trav' in kwargs:
-            both.save(os.path.join(relative_path,f'masks_{i}.jpg'))
-        if 'pose_cam_in_world' in kwargs:
-            pose_cam_in_world = kwargs.get('pose_cam_in_world')
-            torch.save(pose_cam_in_world, os.path.join(relative_path,f'cam_loc_{i}.pt'))
-        # if 'depth' in kwargs:
-        #     depth = kwargs.get('depth')
-        #     torch.save(depth, os.path.join(relative_path,f'depth_{i}.pt'))
-        # if 'depth_np' in kwargs:
-        #     depth = kwargs.get('depth_np')
-        #     mask = np.isinf(depth)
-        #     depth[mask] = 0
-        #     depth = depth / np.max(depth)
-        #     depth[mask] = 1
-        #     depth *= 255
-        #     depth = depth.astype('uint8')
-
-        #     image = Image.fromarray(depth)
-            
-        #     image.save(os.path.join(relative_path, f'depth_img_{i}.jpg'))
-
+                print("Created Directory")
+            torch.save(rgb,F"image_command/{stage_name}/{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
+            print("Saved Image")
 
     # NOTE: Required for raytracing calls.
     def on_physics_step(step, step_size : float):
@@ -429,17 +275,11 @@ class AnymalRunner(object):
         return True
 
     def respawn_anymal(self, loc=(0,0,0)):
-        #TODO: clear the proprio and mission node graphs on respawn
-        # maybe the robot prim itself stays in place, while its parts move after a reset
-        # watch the anymal itself position before and after reset
 
         self.robot_state.reset()
         self.lock_proprio(250) # resself._input_keyboard_mapping
-        # rotate robot to face towards goal node from the start
-        #theta = (360 + 180 * np.arctan2(self.planner.goal[1], self.planner.goal[0]) / np.pi) % 360
-        theta = 90
         
-        transform(F"{self.anymal_prim_path}/base", translation=[loc[0],loc[1],loc[2] + SimConfig.robot_height], rotation=[0,0,theta])
+        transform(F"{self.anymal_prim_path}/base", translation=[loc[0],loc[1] + SimConfig.robot_height,loc[2]], rotation=[-90,0,0])
 
         self.planner.calculate_path(self.robot_state.get_xyt_pose())
         self.reset_count += 1
@@ -459,7 +299,7 @@ class AnymalRunner(object):
         torch_image = torch.from_numpy(rgb_image).float().to(SimConfig.device)
         torch_image = torch_image.permute(2, 0, 1)[:3] # change to channel first: (3, n, m)
         img = torch_image / 255.0
-        size = self.model_image_size
+        size = (224,224)
 
         if img.size()[1] < size[0] or img.size()[2] < size[1]:
             img = F.interpolate(img[None], size, mode='bilinear').squeeze(0)

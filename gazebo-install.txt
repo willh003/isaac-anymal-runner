@@ -1,0 +1,69 @@
+Create an ssh key and add it to gitlab
+
+sudo apt install lsb-release gnupg2 ca-certificates curl
+
+NOTE: replace <user> and password below
+sudo sh -c 'echo "machine packages.anybotics.com login <user> password <password>" > /etc/apt/auth.conf.d/packages.anybotics.com.conf' && sudo chmod 600 /etc/apt/auth.conf.d/packages.anybotics.com.conf
+curl -fsSL https://packages.anybotics.com/gpg | sudo apt-key add -
+
+
+Go into /etc/apt/sources.list.d and remove anything related to anymal (it will probably have an any prefix)
+sudo sh -c 'echo "deb [arch=amd64] https://packages-ros.anybotics.com/ros/release-23.04/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/any-ros-23.04.list'
+sudo sh -c 'echo "deb [arch=amd64] https://packages.anybotics.com/robot-configuration/ubuntu/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/anymal-config.list'
+sudo sh -c 'echo "deb [arch=amd64] https://packages.anybotics.com/anymal-research/release-23.04/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/anymal-rsl-23.04.list'
+sudo sh -c 'echo "Package: *\nPin: origin \"packages.anybotics.com\"\nPin-Priority: 990" > /etc/apt/preferences.d/anybotics-default'
+sudo apt update
+
+Install ros noetic
+
+sudo bash -c 'echo "yaml https://raw.githubusercontent.com/ANYbotics/anydistro/master/rosdep/base.yaml" > /etc/ros/rosdep/sources.list.d/10-any.list'
+rosdep update
+
+
+sudo apt install \
+doxygen \
+python3-catkin-tools \
+python3-pip \
+python3-rosclean \
+python3-rosparam \
+ros-noetic-any-gazebo-msgs-dev \
+ros-noetic-any-hector-gazebo-plugins-dev \
+ros-noetic-anydrive-ethercat-ros-dev \
+ros-noetic-anydrive-monitor-dev \
+ros-noetic-anymal-c-sim \
+ros-noetic-anymal-config-caiman \
+ros-noetic-anymal-config-camel \
+ros-noetic-anymal-config-cerberus \
+ros-noetic-anymal-config-chimera \
+ros-noetic-anymal-config-d01 \
+ros-noetic-anymal-config-d008 \
+ros-noetic-anymal-config-d020 \
+ros-noetic-anymal-d-sim \
+ros-noetic-anymal-motion-control-manager-dev \
+ros-noetic-anymal-velodyne-dev \
+ros-noetic-basic-contact-estimation-dev \
+ros-noetic-cmake-python-coverage-dev \
+ros-noetic-conditional-state-machine-dev \
+ros-noetic-cosmo-node-dev \
+ros-noetic-gazebo-worlds-dev \
+ros-noetic-joy-interface-dev \
+ros-noetic-joy-manager-dev \
+ros-noetic-joystick-label-dev \
+ros-noetic-loco-anymal-dev \
+ros-noetic-loco-ros-anymal-dev \
+ros-noetic-pdb-msgs-dev \
+ros-noetic-robot-behavior-plugins-msgs-dev \
+ros-noetic-series-elastic-actuator-anydrive-dev \
+ros-noetic-series-elastic-actuator-sim-dev \
+ros-noetic-spinner-widget-dev \
+ros-noetic-tf-to-pose-converter-dev \
+ros-noetic-user-interaction-mode-msgs-dev \
+ros-noetic-velodyne-pointcloud \
+wmctrl
+
+sudo apt install libvtk7-dev
+
+Finally, cd into catkin workspace, and:
+git clone git@bitbucket.org:leggedrobotics/anymal_rsl.git
+
+Then, just build and launch

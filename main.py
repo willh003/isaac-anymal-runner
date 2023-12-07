@@ -47,7 +47,8 @@ from states import RobotState, LearningState
 from config import SimConfig, StageConfig, DebugConfig
 from utils import *
 
-from bc_trav.model_factories import trav_prior_factory
+from bc_trav.model_factories import trav_prior_factory, bc_factory
+from kornia.geometry.camera.pinhole import PinholeCamera
 
 
 class AnymalRunner(object):
@@ -101,6 +102,9 @@ class AnymalRunner(object):
         #checkpoint='/home/pcgta/Documents/playground/bc_trav/bc_trav/trav_checkpoints/fastervit-epoch=59-step=125880-b=8-lr=6e-04.ckpt'
         checkpoint='/home/pcgta/Documents/playground/bc_trav/bc_trav/trav_checkpoints/best_traversability.ckpt'
         self.model = trav_prior_factory(checkpoint, self.model_image_size)
+        self.action_model = bc_factory('/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/tuned_fastervit.yaml',
+                                       '/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/bc_train.yaml', 
+                                       checkpoint,)
         self.cur_image = None
 
         # Data collection
@@ -148,7 +152,7 @@ class AnymalRunner(object):
 
         # add callbacks (executes from BOTTOM FIRST, last-in-first-out):
         self._world.add_physics_callback("IsaacRunner_Physics", self.on_physics_step)
-        self._world.add_physics_callback("inference", callback_fn = self.image_inference_callback)
+        self._world.add_physics_callback("inference", callback_fn = self.save_image_callback)
         self._world.add_physics_callback("anymal_advance", callback_fn=self.main_physics_callback)
         #self._world.add_physics_callback("logging", callback_fn = self.logging_callback)
 
@@ -163,21 +167,22 @@ class AnymalRunner(object):
         if not self.robot_state.is_moving(threshold=.4) or not self.robot_state.is_standing():
             self.respawn_anymal()
 
+        assert SimConfig.control_type in ['manual', 'action_model', 'goal_driven']
+
         if self._anymal_direct is not None:
-            if  SimConfig.manual_control:
+            if  SimConfig.control_type == 'manual' or SimConfig.control_type == 'action_model':
                 self._anymal.advance(step_size, self._base_command)
-            else:
+            elif SimConfig.control_type == 'goal_driven':
                 pose = self.robot_state.get_xyt_pose()
                 self._base_command = self.planner.calculate_action(self.planner.path, pose,
                                                         fwd_vel=SimConfig.robot_max_velocity, look_ahead=SimConfig.look_ahead)
                 self._anymal.advance(step_size, self._base_command)
-
-
+        
                 
     def planning_callback(self, step_size):
         '''Calls upon the planner to update, defers to user input if enabled.'''
         if self._world.current_time_step_index % SimConfig.planner_callback_rate == 0: 
-            if not SimConfig.manual_control:
+            if SimConfig.control_type == 'goal_driven':
                 pose = self.robot_state.get_xyt_pose()
                 self.planner.calculate_path(pose)
 
@@ -209,6 +214,18 @@ class AnymalRunner(object):
     __image_inference_callback_counter = 0
 
     def image_inference_callback(self, step_size):
+        if self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
+            return
+        
+        self._anymal_direct.front_depth_camera.buffer()
+        self._anymal_direct.front_depth_camera.save_latest_data()
+        image = self._anymal_direct.front_depth_camera.data.output
+        rgb_image = image['rgb'] 
+        theta = self.action_model(rgb_image)
+        self._base_command = np.array([1, 0, theta])
+
+
+    def save_image_callback(self, step_size):
         if not self.recording or self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
             return
         
@@ -216,19 +233,10 @@ class AnymalRunner(object):
         self._anymal_direct.front_depth_camera.save_latest_data()
         image = self._anymal_direct.front_depth_camera.data.output
         rgb_image = image['rgb'] 
-
-        torch_image = torch.from_numpy(rgb_image).float().to(SimConfig.device)
-        torch_image = torch_image.permute(2, 0, 1)[:3] # change to channel first: (3, n, m)
-        img = torch_image / 255.0
-        size = self.model_image_size
-
-        if img.size()[1] < size[0] or img.size()[2] < size[1]:
-            img = F.interpolate(img[None], size, mode='bilinear').squeeze(0)
-
-        #img = torchvision.transforms.functional.center_crop(img, size)
-        img = F.interpolate(img[None], size, mode='bilinear').squeeze(0)
-        cu_img = img.cuda()[None]
         
+        img = self.clean_image_for_model(rgb_image)
+
+        cu_img = img.cuda()[None]
         probs = self.model(cu_img)
         pred = torch.argmax(probs[0], dim=0).cpu()
 
@@ -246,7 +254,7 @@ class AnymalRunner(object):
         if StageConfig.default_stage != None:
             stage_name = StageConfig.default_stage.split("/")[-1]
             if not os.path.exists(F"image_command/{stage_name}"):
-                os.mkdir(relative_path)
+                os.mkdir(F"image_command/{stage_name}")
         torch.save(rgbt.detach(),F"image_command/{stage_name}/{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
 
         print('Inference complete')
@@ -439,6 +447,27 @@ class AnymalRunner(object):
 
     def lock_proprio(self, steps):
         self.lock = steps
+
+    def clean_image_for_model(self, rgb_image):
+        """
+        Converts rgb_image to a format that can be used by the model
+
+        Inputs: 
+            rgb_image: a numpy array with color values in (0, 255)
+        """
+
+        torch_image = torch.from_numpy(rgb_image).float().to(SimConfig.device)
+        torch_image = torch_image.permute(2, 0, 1)[:3] # change to channel first: (3, n, m)
+        img = torch_image / 255.0
+        size = self.model_image_size
+
+        if img.size()[1] < size[0] or img.size()[2] < size[1]:
+            img = F.interpolate(img[None], size, mode='bilinear').squeeze(0)
+
+        #img = torchvision.transforms.functional.center_crop(img, size)
+        img = F.interpolate(img[None], size, mode='bilinear').squeeze(0)
+        return img
+
 
 def main():
     """Parse arguments and instantiate/run Orbit."""

@@ -76,7 +76,7 @@ class SimConfig:
 
     # Simulation and Planner params
     sim_mode = 'log' # either 'log' or 'wvn'. If 'log', just collects images and camera locations. If 'wvn', runs the full wvn pipeline
-    manual_control = True
+    control_type = 'manual' # manual, goal_driven, or action_model
     teamviewer=False
 
     robot_spawn_location = (0, 0, 0)

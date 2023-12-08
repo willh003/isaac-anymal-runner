@@ -172,10 +172,11 @@ class AnymalRunner(object):
 
 
     __save_image_callback_counter = 0
+    __save_image_callback_rollout = 0
     def save_image_callback(self, step_size):
         if not self.recording or self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
             return
-        
+
         self._anymal_direct.front_depth_camera.buffer()
         self._anymal_direct.front_depth_camera.save_latest_data()
         image = self._anymal_direct.front_depth_camera.data.output
@@ -192,9 +193,12 @@ class AnymalRunner(object):
         rgb[:,:,:3] = img.permute(1,2,0)
 
         # Save Result
+        rollout = self.__save_image_callback_rollout
         num = self.__save_image_callback_counter; 
-        self.__save_image_callback_counter+=1
         cmd = F"{self._base_command[0]},{self._base_command[1]},{self._base_command[2]}"
+
+        # if num % 12 == 0:
+        #     cv2.imwrite(F"for_paper_{num}.jpg", live_preview_img)
 
         if not os.path.exists("image_command"):
             os.mkdir("image_command")
@@ -204,8 +208,15 @@ class AnymalRunner(object):
             if not os.path.exists(F"image_command/{stage_name}"):
                 os.mkdir(F"image_command/{stage_name}")
                 print("Created Directory")
-            torch.save(rgb,F"image_command/{stage_name}/{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
-            print("Saved Image")
+            torch.save(rgb,F"image_command/{stage_name}/{rollout},{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
+            #print("Saved Image")
+
+            if self.__save_image_callback_counter % 22 == 21:
+                self.__save_image_callback_rollout += 1
+                self.__save_image_callback_counter = 0
+                self.respawn_anymal()
+            else:
+                self.__save_image_callback_counter += 1
 
     # NOTE: Required for raytracing calls.
     def on_physics_step(step, step_size : float):
@@ -279,7 +290,8 @@ class AnymalRunner(object):
         self.robot_state.reset()
         self.lock_proprio(250) # resself._input_keyboard_mapping
         
-        theta = np.random.random()*360
+        theta = -25 + np.sign((np.random.random()-0.5))*8.5
+        print(theta)
         transform(F"{self.anymal_prim_path}/base", translation=[loc[0],loc[1] + SimConfig.robot_height,loc[2]], rotation=[-90,theta,0])
 
         self.planner.calculate_path(self.robot_state.get_xyt_pose())

@@ -19,7 +19,7 @@ class SimConfig:
     # Robot specs (comments are what I get from orbit bounding box)
     robot_length= 1.0 # 1.05
     robot_width= 0.6 # .67
-    robot_height= 0.6 # .7 - maybe this one is just robot height without the legs?
+    robot_height= 0.7 # .7 - maybe this one is just robot height without the legs?
 
     # Traversability estimation params      # NOTE : Default Values
     traversability_radius= 5*5.0 # meters     # 5.0m
@@ -99,18 +99,18 @@ class SimConfig:
             "A": [0.0, 1.0, 0.0],
             "LEFT": [0.0, 1.0, 0.0],
             # yaw command (positive)
-            "NUMPAD_7": [0.0, 0.0, 1.0],
-            "N": [0.0, 0.0, 1.0],
+            "NUMPAD_7": [0.0, 0.0, 0.15],
+            "N": [0.0, 0.0, 0.15],
             # yaw command (negative)
-            "NUMPAD_9": [0.0, 0.0, -1.0],
-            "M": [0.0, 0.0, -1.0],
+            "NUMPAD_9": [0.0, 0.0, -0.15],
+            "M": [0.0, 0.0, -0.15],
         }
 
 class StageConfig:
     #----------------------#
     #   stage parameters   #
     #----------------------#
-    default_stage : Optional[str] =  "/home/sean/Desktop/Hintze_Hall.usd"
+    default_stage : Optional[str] =  "/home/sean/Desktop/Lincolns_Inn_Chapel_Undercroft.usd"
 
     xdim : int = 100 # NOTE: Has some relationship with env_x and env_y from the StaticParams
     ydim : int = 100

@@ -284,7 +284,7 @@ class AnymalRunner(object):
 
         self.planner.calculate_path(self.robot_state.get_xyt_pose())
         self.reset_count += 1
-        print(f'RESET #{self.reset_count}')
+        print(f'RESET #{self.reset_count}/20')
 
     def lock_proprio(self, steps):
         self.lock = steps

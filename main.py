@@ -119,7 +119,7 @@ class AnymalRunner(object):
         self._anymal_direct.front_depth_camera.setup_image_data_logger()
         self._anymal_direct.front_depth_camera.reset()
 
-        transform(self.anymal_prim_path+"/base",translation=[0,0,SimConfig.robot_height])
+        transform(self.anymal_prim_path+"/base",translation=[0,SimConfig.robot_height,0])
 
     def setup(self) -> None:
         """
@@ -211,10 +211,8 @@ class AnymalRunner(object):
             torch.save(rgb,F"image_command/{stage_name}/{rollout},{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
             #print("Saved Image")
 
-            if self.__save_image_callback_counter % 22 == 21:
-                self.__save_image_callback_rollout += 1
-                self.__save_image_callback_counter = 0
-                self.respawn_anymal()
+            if self.__save_image_callback_counter % SimConfig.frames_per_rollout == SimConfig.frames_per_rollout - 1:
+                self.respawn_anymal() # NOTE: updates the counters
             else:
                 self.__save_image_callback_counter += 1
 
@@ -290,13 +288,16 @@ class AnymalRunner(object):
         self.robot_state.reset()
         self.lock_proprio(250) # resself._input_keyboard_mapping
         
-        theta = -25 + np.sign((np.random.random()-0.5))*8.5
+        theta = 0 # 90 #-25 + np.sign((np.random.random()-0.5))*8.5
         print(theta)
         transform(F"{self.anymal_prim_path}/base", translation=[loc[0],loc[1] + SimConfig.robot_height,loc[2]], rotation=[-90,theta,0])
 
         self.planner.calculate_path(self.robot_state.get_xyt_pose())
         self.reset_count += 1
-        print(f'RESET #{self.reset_count}/20')
+        print(f'RESET #{self.reset_count}/{SimConfig.max_resets}')
+
+        self.__save_image_callback_rollout += 1
+        self.__save_image_callback_counter = 0
 
     def lock_proprio(self, steps):
         self.lock = steps

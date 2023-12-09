@@ -19,7 +19,7 @@ class SimConfig:
     # Robot specs (comments are what I get from orbit bounding box)
     robot_length= 1.0 # 1.05
     robot_width= 0.6 # .67
-    robot_height= 0.7 # .7 - maybe this one is just robot height without the legs?
+    robot_height= 0.65 # .92- maybe this one is just robot height without the legs?
 
     # Traversability estimation params      # NOTE : Default Values
     traversability_radius= 5*5.0 # meters     # 5.0m
@@ -79,16 +79,19 @@ class SimConfig:
     control_type = 'manual' # manual, goal_driven, or action_model
     teamviewer=False
 
+    # Rollout Settings
+
     robot_spawn_location = (0, 0, 0)
     env_x = 80
     env_y = 80
     look_ahead = 10
     draw_markers = '' # '' for no markers, 'sparse' for just the current path, or 'dense' for the whole graph
-    max_resets = 20 # number of resets to perform before shutdown. None to run forever
+    max_resets = 30 # number of resets to perform before shutdown. None to run forever
+    frames_per_rollout = 53
     input_keyboard_mapping = {
             # forward command
-            "W": [1.25, 0.0, 0.0],
-            "UP": [1.25, 0.0, 0.0],
+            "W": [1.5, 0.0, 0.0],
+            "UP": [1.5, 0.0, 0.0],
             # back command
             "S": [-1.0, 0.0, 0.0],
             "DOWN": [-1.0, 0.0, 0.0],
@@ -99,11 +102,11 @@ class SimConfig:
             "A": [0.0, 1.0, 0.0],
             "LEFT": [0.0, 1.0, 0.0],
             # yaw command (positive)
-            "NUMPAD_7": [0.0, 0.0, 0.15],
-            "N": [0.0, 0.0, 0.15],
+            "NUMPAD_7": [0.0, 0.0, 0.4],
+            "N": [0.0, 0.0, 0.4],
             # yaw command (negative)
-            "NUMPAD_9": [0.0, 0.0, -0.15],
-            "M": [0.0, 0.0, -0.15],
+            "NUMPAD_9": [0.0, 0.0, -0.4],
+            "M": [0.0, 0.0, -0.4],
         }
 
 class StageConfig:

@@ -30,6 +30,7 @@ import torchvision.transforms
 from PIL import Image
 import cv2
 import carb
+import yaml
 
 # Stage Builder Imports
 from isaac_stage.utils import open_stage, save_stage, get_context, get_stage
@@ -41,13 +42,14 @@ from camera_wrapper import CameraWrapper, ANYMAL_D_CFG
 
 # Planning Imports
 from ws_isaac_planner.planner import PlanningAgent
+from ws_isaac_planner.utils import pure_pursuit_step
 
 # General 
 from states import RobotState, LearningState
-from config import SimConfig, StageConfig, DebugConfig
+from config import SimConfig, StageConfig, DebugConfig, ModelConfig
 from utils import *
 
-from bc_trav.model_factories import trav_prior_factory, bc_factory
+from bc_trav.model_factories import trav_prior_factory, bc_fusion_factory, bc_no_trav_factory, bc_only_trav_factory
 from kornia.geometry.camera.pinhole import PinholeCamera
 
 
@@ -97,19 +99,44 @@ class AnymalRunner(object):
         
         self.planner.random_new_goal()
 
-        # Inference modules
-        self.model_image_size=(224,224)
-        #checkpoint='/home/pcgta/Documents/playground/bc_trav/bc_trav/trav_checkpoints/fastervit-epoch=59-step=125880-b=8-lr=6e-04.ckpt'
-        checkpoint='/home/pcgta/Documents/playground/bc_trav/bc_trav/trav_checkpoints/best_traversability.ckpt'
-        self.model = trav_prior_factory(checkpoint, self.model_image_size)
-        self.action_model = bc_factory('/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/tuned_fastervit.yaml',
-                                       '/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/bc_train.yaml', 
-                                       checkpoint,)
+
+        
+        with open(ModelConfig.trav_cfg_path, 'r') as file:
+            trav_cfg = yaml.safe_load(file)
+        trav_checkpoint = trav_cfg['traversability']['checkpoint_path']
+
+        self.model = trav_prior_factory(trav_checkpoint, ModelConfig.model_image_size)
+        
+        bc_model = bc_fusion_factory(trav_cfg_path = ModelConfig.trav_cfg_path,
+                                       train_cfg_path= ModelConfig.train_cfg_path, 
+                                       ckpt= ModelConfig.action_checkpoint,
+                                       device = SimConfig.device)
+        self.action_model = self.discrete_action_model(bc_model, theta_scale=.4)
         self.cur_image = None
 
         # Data collection
         self.recording = False
+        self.obs_num=0
+        self.rollout_num=0
 
+    def discrete_action_model(self, model, theta_scale=.4):
+        """
+        Given a model that outputs a vector of size 3, containing probs for left turn, straight, right turn:
+        Return a rotation value to apply (scaled by theta_scale) 
+        """
+        def action_fn(x):
+            probs = model(x)
+
+            amax = torch.argmax(probs).item()
+            if amax==0:
+                return -1*theta_scale
+            elif amax==1:
+                return 0.0
+            else:
+                return theta_scale
+
+        return action_fn
+    
     def spawn_anymal(self):
         # spawn anymal
         self.anymal_prim_path = "/World/AnymalC/Robot_1"
@@ -129,6 +156,7 @@ class AnymalRunner(object):
                                                       orientation=[.50603, .42113, -.48007, -.57642]) # NOTE: Old orientation for old camera.
         param_attr = getattr(self._anymal_direct.front_depth_camera._sensor_prim, f"GetVerticalApertureAttr")
         set_prop_val(param_attr(), .93)
+        self.intrinsics = self._anymal_direct.front_depth_camera.compute_K()
 
         # initialize camera
         self._anymal_direct.front_depth_camera.initialize()
@@ -152,7 +180,8 @@ class AnymalRunner(object):
 
         # add callbacks (executes from BOTTOM FIRST, last-in-first-out):
         self._world.add_physics_callback("IsaacRunner_Physics", self.on_physics_step)
-        self._world.add_physics_callback("inference", callback_fn = self.save_image_callback)
+        #self._world.add_physics_callback("inference", callback_fn = self.image_inference_callback)
+        self._world.add_physics_callback("observe", callback_fn = self.save_image_callback)
         self._world.add_physics_callback("anymal_advance", callback_fn=self.main_physics_callback)
         #self._world.add_physics_callback("logging", callback_fn = self.logging_callback)
 
@@ -202,11 +231,7 @@ class AnymalRunner(object):
         torch_depth = torch.from_numpy(depth)[None].to(SimConfig.device)
 
 
-        camera_parent = 'wide_angle_camera_front_camera'
-        T_PIW = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}"), ordering="wxyz").to(SimConfig.device)
-        T_CIP = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}/Camera"), ordering="wxyz").to(SimConfig.device)
-        T_CIW = T_PIW @ T_CIP @ torch.Tensor([[-1,0,0,0],[0,1,0,0],[0,0,-1,0],[0,0,0,1]]).to(device='cuda') 
- 
+        T_CIW = self.get_cam_in_world()
         self.log_data(img = rgb_image[:,:,:3], depth = torch_depth, pose_cam_in_world=T_CIW)
 
         self.cur_image = rgb_image
@@ -217,47 +242,84 @@ class AnymalRunner(object):
         if self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
             return
         
-        self._anymal_direct.front_depth_camera.buffer()
-        self._anymal_direct.front_depth_camera.save_latest_data()
-        image = self._anymal_direct.front_depth_camera.data.output
-        rgb_image = image['rgb'] 
-        theta = self.action_model(rgb_image)
-        self._base_command = np.array([1, 0, theta])
+        if len(self.robot_state.img_memory) < 6:
+            return
+
+        obs = torch.stack([self.clean_image_for_model(image) for image in self.robot_state.img_memory])
+        obs = obs.to(SimConfig.device)
+
+        theta = self.action_model(obs[None]) # expand dims because it should be batched 
+        self._base_command = np.array([1.5, 0, theta])
+        print(f'theta pred: {theta}')
+
+    
+
+    def mean_traversable_point_model(self, rgb_image, depth_image):
+        """
+        Go to a random traversable point
+        """
+
+        img, depth_clean = self.clean_image_for_model(rgb_image, depth_image)
+
+        cu_img = img.cuda()[None]
+        probs = self.model(cu_img)
+        mask = torch.argmax(probs[0], dim=0)
+        zero_indices = torch.nonzero(mask == 0)
+        
+
+        idx = torch.floor(torch.random(1) * len(zero_indices))
+        point = zero_indices[idx]
+        depth = depth_clean[math.floor(point[0]), math.floor(point[1])]
+        
+        intrinsics = self._anymal_direct.front_depth_camera.K.clone()
+        
+        world_loc = self.unproject(point, depth, intrinsics)
+
+        self.carrot = world_loc
 
 
     def save_image_callback(self, step_size):
-        if not self.recording or self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
+        if self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
             return
         
         self._anymal_direct.front_depth_camera.buffer()
         self._anymal_direct.front_depth_camera.save_latest_data()
         image = self._anymal_direct.front_depth_camera.data.output
         rgb_image = image['rgb'] 
-        
-        img = self.clean_image_for_model(rgb_image)
 
-        cu_img = img.cuda()[None]
-        probs = self.model(cu_img)
-        pred = torch.argmax(probs[0], dim=0).cpu()
+        self.robot_state.add_image(rgb_image)
 
-        save_mask(img, pred)
+        if self.recording:
+            rgb_image = self.clean_image_for_model(rgb_image).permute(1,2,0).cpu()
+            path = f'bc_data/{self.rollout_num},{self.obs_num},{self._base_command[0]},{self._base_command[1]},{self._base_command[2]}.pt'
+            torch.save(rgb_image, path)
+            self.obs_num+=1
 
-        rgbt = torch.zeros((224,224,4))
-        rgbt[:,:,:3] = img.permute(1,2,0)
-        rgbt[:,:, 3] = pred
+        if False:
+            img = self.clean_image_for_model(rgb_image)
 
-        # Save Result
-        num = self.__image_inference_callback_counter; 
-        self.__image_inference_callback_counter+=1
-        cmd = F"{self._base_command[0]},{self._base_command[1]},{self._base_command[2]}"
+            cu_img = img.cuda()[None]
+            probs = self.model(cu_img)
+            pred = torch.argmax(probs[0], dim=0).cpu()
 
-        if StageConfig.default_stage != None:
-            stage_name = StageConfig.default_stage.split("/")[-1]
-            if not os.path.exists(F"image_command/{stage_name}"):
-                os.mkdir(F"image_command/{stage_name}")
-        torch.save(rgbt.detach(),F"image_command/{stage_name}/{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
+            save_mask(img, pred, 'live_updates/live.png')
 
-        print('Inference complete')
+            rgbt = torch.zeros((224,224,4))
+            rgbt[:,:,:3] = img.permute(1,2,0)
+            rgbt[:,:, 3] = pred
+
+            # Save Result
+            num = self.__image_inference_callback_counter; 
+            self.__image_inference_callback_counter+=1
+            cmd = F"{self._base_command[0]},{self._base_command[1]},{self._base_command[2]}"
+
+            if StageConfig.default_stage != None:
+                stage_name = StageConfig.default_stage.split("/")[-1]
+                if not os.path.exists(F"image_command/{stage_name}"):
+                    os.mkdir(F"image_command/{stage_name}")
+            #torch.save(rgbt.detach(),F"image_command/{stage_name}/{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
+
+            print('Inference complete')
 
 
     def image_and_proprio_callback(self, step_size):
@@ -410,6 +472,9 @@ class AnymalRunner(object):
                 print(self._base_command)
             elif event.input.name == "R":
                 self.respawn_anymal(SimConfig.robot_spawn_location)
+                if self.recording:
+                    self.rollout_num += 1
+                    self.obs_num = 0
             elif event.input.name == "P":
                 self.recording = not self.recording
                 print(f"Recording: {self.recording}")
@@ -439,7 +504,7 @@ class AnymalRunner(object):
         #theta = (360 + 180 * np.arctan2(self.planner.goal[1], self.planner.goal[0]) / np.pi) % 360
         theta = 90
         
-        transform(F"{self.anymal_prim_path}/base", translation=[loc[0],loc[1],loc[2] + SimConfig.robot_height], rotation=[0,0,theta])
+        transform(F"{self.anymal_prim_path}/base", translation=[loc[0],loc[1]+ SimConfig.robot_height,loc[2] ], rotation=SimConfig.robot_spawn_rotation)
 
         self.planner.calculate_path(self.robot_state.get_xyt_pose())
         self.reset_count += 1
@@ -448,9 +513,10 @@ class AnymalRunner(object):
     def lock_proprio(self, steps):
         self.lock = steps
 
-    def clean_image_for_model(self, rgb_image):
+    def clean_image_for_model(self, rgb_image, depth_image = None):
         """
         Converts rgb_image to a format that can be used by the model
+        If depth_image is provided, scales it in the same way as rgb_image
 
         Inputs: 
             rgb_image: a numpy array with color values in (0, 255)
@@ -459,15 +525,34 @@ class AnymalRunner(object):
         torch_image = torch.from_numpy(rgb_image).float().to(SimConfig.device)
         torch_image = torch_image.permute(2, 0, 1)[:3] # change to channel first: (3, n, m)
         img = torch_image / 255.0
-        size = self.model_image_size
 
-        if img.size()[1] < size[0] or img.size()[2] < size[1]:
-            img = F.interpolate(img[None], size, mode='bilinear').squeeze(0)
+        img = F.interpolate(img[None], ModelConfig.model_image_size, mode='bilinear').squeeze(0)
 
-        #img = torchvision.transforms.functional.center_crop(img, size)
-        img = F.interpolate(img[None], size, mode='bilinear').squeeze(0)
+        if torch.is_tensor(depth_image):
+            torch_depth = torch.from_numpy(depth_image).float().to(SimConfig.device)
+            depth_interp= F.interpolate(torch_depth[None],
+                                        ModelConfig.model_image_size,
+                                        mode='bilinear').squeeze(0)
+            return img, depth_interp 
+        
         return img
+    
+    def unproject(self, point, depth, intrinsics):
+        T_CIW = self.get_cam_in_world()
+        P = intrinsics @ T_CIW
+        P_inv = torch.inverse(P) # (4, 4)
+        homogenous = torch.stack(depth * point, torch.as_tensor([depth,1]))
+        transform = P_inv @ homogenous
+        
+        return transform
+        
 
+    def get_cam_in_world(self):
+        camera_parent = 'wide_angle_camera_front_camera'
+        T_PIW = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}"), ordering="wxyz").to(SimConfig.device)
+        T_CIP = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}/Camera"), ordering="wxyz").to(SimConfig.device)
+        T_CIW = T_PIW @ T_CIP @ torch.Tensor([[-1,0,0,0],[0,1,0,0],[0,0,-1,0],[0,0,0,1]]).to(device='cuda') 
+        return T_CIW
 
 def main():
     """Parse arguments and instantiate/run Orbit."""

@@ -47,7 +47,7 @@ class SimConfig:
     image_callback_rate= 8 #10 hz
     proprio_callback_rate= 20  #4 hz
     learning_callback_rate= 8 #10 hz
-    inference_callback_rate = 40
+    inference_callback_rate = 8
     planner_callback_rate = 400
 
     # Runtime options
@@ -79,11 +79,13 @@ class SimConfig:
     control_type = 'manual' # manual, goal_driven, or action_model
     teamviewer=False
 
-    robot_spawn_location = (0, 0, 0)
+    robot_spawn_location = (-.103, 0, -11.356)#(-3.7, 0, -1.3)
+    robot_spawn_rotation = [-90.446, -120.185, 0] # [-90,90,0]
     env_x = 80
     env_y = 80
     look_ahead = 10
-    robot_max_velocity= 0.5
+    robot_max_velocity= 1.2
+    robot_rot_velocity= .6
     draw_markers = '' # '' for no markers, 'sparse' for just the current path, or 'dense' for the whole graph
     max_resets = 20 # number of resets to perform before shutdown. None to run forever
     input_keyboard_mapping = {
@@ -100,18 +102,18 @@ class SimConfig:
             "A": [0.0, robot_max_velocity, 0.0],
             "LEFT": [0.0, robot_max_velocity, 0.0],
             # yaw command (positive)
-            "NUMPAD_7": [0.0, 0.0, robot_max_velocity],
-            "N": [0.0, 0.0, robot_max_velocity],
+            "NUMPAD_7": [0.0, 0.0, robot_rot_velocity],
+            "N": [0.0, 0.0, robot_rot_velocity],
             # yaw command (negative)
-            "NUMPAD_9": [0.0, 0.0, -robot_max_velocity],
-            "M": [0.0, 0.0, -robot_max_velocity],
+            "NUMPAD_9": [0.0, 0.0, -robot_rot_velocity],
+            "M": [0.0, 0.0, -robot_rot_velocity],
         }
 
 class StageConfig:
     #----------------------#
     #   stage parameters   #
     #----------------------#
-    default_stage : Optional[str] = '/home/pcgta/Documents/cs6670finalproject/anymalrunner/stages/Hintze_Hall.usd'
+    default_stage : Optional[str] = '/home/pcgta/Documents/cs6670finalproject/anymalrunner/stages/Lincolns_Inn_Chapel_Undercroft.usd'
 
     xdim : int = 100 # NOTE: Has some relationship with env_x and env_y from the StaticParams
     ydim : int = 100
@@ -144,6 +146,17 @@ class StageConfig:
     #   stage builder   #
     #-------------------#
     stage_builder : StageBuilder = ForestStageBuilder(xdim=xdim, ydim=ydim, terrain=terrain, asset_manager=asset_manager)
+
+
+class ModelConfig:
+    # NOTE: train_cfg_path required even if not training (must match the config that the model was trained on)
+    train_cfg_path = '/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/bc_train.yaml'
+
+    trav_cfg_path = '/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/tuned_fastervit.yaml'
+    action_checkpoint = '/home/pcgta/Documents/playground/bc_trav/bc_trav/bc_checkpoints/lr3e-6_69epochs.ckpt'
+
+    model_image_size = (224, 224)
+
 
 class DebugConfig:
     """This class contains flags and methods for debugging."""

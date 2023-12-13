@@ -76,11 +76,11 @@ class SimConfig:
 
     # Simulation and Planner params
     sim_mode = 'log' # either 'log' or 'wvn'. If 'log', just collects images and camera locations. If 'wvn', runs the full wvn pipeline
-    control_type = 'manual' # manual, goal_driven, or action_model
+    control_type = 'action_model' # manual, goal_driven, or action_model
     teamviewer=False
 
-    robot_spawn_location = (-.103, 0, -11.356)#(-3.7, 0, -1.3)
-    robot_spawn_rotation = [-90.446, -120.185, 0] # [-90,90,0]
+    robot_spawn_location = [0,0,0] #[2.78, 14.28, 0] #[0,0,0]#(-3.7, 0, -1.3)
+    robot_spawn_rotation = [0, 0, -140] # [-90,90,0]
     env_x = 80
     env_y = 80
     look_ahead = 10
@@ -113,7 +113,7 @@ class StageConfig:
     #----------------------#
     #   stage parameters   #
     #----------------------#
-    default_stage : Optional[str] = '/home/pcgta/Documents/cs6670finalproject/anymalrunner/stages/Lincolns_Inn_Chapel_Undercroft.usd'
+    default_stage : Optional[str] = 'stages/Lake_Shore_Drone_Scan.usd'
 
     xdim : int = 100 # NOTE: Has some relationship with env_x and env_y from the StaticParams
     ydim : int = 100
@@ -153,10 +153,13 @@ class ModelConfig:
     train_cfg_path = '/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/bc_train.yaml'
 
     trav_cfg_path = '/home/pcgta/Documents/playground/bc_trav/bc_trav/configs/tuned_fastervit.yaml'
-    action_checkpoint = '/home/pcgta/Documents/playground/bc_trav/bc_trav/bc_checkpoints/lr3e-6_69epochs.ckpt'
+    action_checkpoint = '/home/pcgta/Documents/playground/bc_trav/bc_trav/bc_checkpoints/test/trav-epoch=68-step=27462-b=16-lr=3e-6.ckpt'
 
     model_image_size = (224, 224)
-
+    model_type = 'heuristic' 
+    "'trav', 'image', 'fusion', 'heuristic'"
+    heuristic_type = "BH-OCTS"
+    "COLS, OCTS, BH-OCTS, BHP-OCTS"
 
 class DebugConfig:
     """This class contains flags and methods for debugging."""

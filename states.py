@@ -37,6 +37,9 @@ class RobotState:
         # memory of robot, where 4:7th elements of each item contain the quaternions of robot's rotation
         self.pose_memory = deque(maxlen=100)
 
+        # previous 6 images for robot
+        self.img_memory = deque(maxlen=6)
+
         self.base_lin_vel = torch.zeros(3)
         self.base_ang_vel = torch.zeros(3)
         self.transform = torch.zeros(7)
@@ -45,6 +48,9 @@ class RobotState:
         self.transform = torch.zeros(7)
         self.transform[-1] = 1 # w quaternion should be 1
         self.pose_memory.clear()
+
+    def add_image(self, img):
+        self.img_memory.append(img)
 
     def set_pose(self, transform):
         '''

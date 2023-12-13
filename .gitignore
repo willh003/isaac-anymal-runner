@@ -5,3 +5,6 @@ stages
 image_command
 __pycache__
 output
+bc_data
+rollout_paths
+stored_bc_data

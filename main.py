@@ -34,7 +34,8 @@ import yaml
 
 # Stage Builder Imports
 from isaac_stage.utils import open_stage, save_stage, get_context, get_stage
-from isaac_stage.prims import create_scope, get_pose, delete, is_defined, transform
+from isaac_stage.prims import create_scope, get_pose, delete, is_defined, transform, create_sphere
+from isaac_stage.appliers import apply_color_to_prim
 
 
 # Camera Imports (Sean)
@@ -49,7 +50,7 @@ from states import RobotState, LearningState
 from config import SimConfig, StageConfig, DebugConfig, ModelConfig
 from utils import *
 
-from bc_trav.model_factories import trav_prior_factory, bc_fusion_factory, bc_no_trav_factory, bc_only_trav_factory
+from bc_trav.model_factories import trav_prior_factory, get_factory_from_type
 from kornia.geometry.camera.pinhole import PinholeCamera
 
 
@@ -105,19 +106,153 @@ class AnymalRunner(object):
             trav_cfg = yaml.safe_load(file)
         trav_checkpoint = trav_cfg['traversability']['checkpoint_path']
 
-        self.model = trav_prior_factory(trav_checkpoint, ModelConfig.model_image_size)
+        self.trav_model = trav_prior_factory(trav_checkpoint, ModelConfig.model_image_size )
         
-        bc_model = bc_fusion_factory(trav_cfg_path = ModelConfig.trav_cfg_path,
-                                       train_cfg_path= ModelConfig.train_cfg_path, 
-                                       ckpt= ModelConfig.action_checkpoint,
-                                       device = SimConfig.device)
-        self.action_model = self.discrete_action_model(bc_model, theta_scale=.4)
+        if ModelConfig.model_type in ['trav', 'image', 'fusion']:
+            factory = get_factory_from_type(ModelConfig.model_type)
+            bc_model = factory(trav_cfg_path = ModelConfig.trav_cfg_path,
+                                           train_cfg_path= ModelConfig.train_cfg_path, 
+                                           ckpt= ModelConfig.action_checkpoint,
+                                           device = SimConfig.device)            
+            self.action_model = self.discrete_action_model(bc_model, theta_scale=.4)
+        else:
+            self.action_model = self.heuristic_trav(theta_scale=.4)
         self.cur_image = None
 
         # Data collection
         self.recording = False
         self.obs_num=0
         self.rollout_num=0
+
+    def heuristic_trav(self, theta_scale=.4):
+        """
+        A heuristic which guides the robot by guiding it towards the most traversable patch.
+        """
+        def action_fn(x : torch.Tensor):
+            if ModelConfig.heuristic_type == "COLS":
+                # x is a (1,6,3,244,244)
+                # Split image into 8 regions, act on most traversable.
+                # [0-2] ->  LEFT
+                # [3-4]   ->  STRAIGHT
+                # [5-7] ->  RIGHT
+                # ._______________.
+                # |0|1|2|3|4|5|6|7|
+                # | | | | | | | | | 
+                # | | | | | | | | | (224 x 224) split into (224x28) patches
+                # | | | | | | | | | 
+                # | | | | | | | | | 
+                # ^^^^^^^^^^^^^^^^^
+                trav = self.trav_model(x[0][-1][None])[0][0] # trav(x) -> (1,2,224,224) -> (224,224)
+
+                regions=[]
+                [regions.append(r) for r in trav.split(28,dim=1)]
+
+                traversability_signals = [region[:,:].mean() for region in regions]
+
+                max_traversable_index = torch.argmax(torch.tensor(traversability_signals))
+                self.__traversability_target_region = max_traversable_index.item()
+
+                if max_traversable_index in [0,1,2]:
+                    return 1 # NOTE: This looks backwards but does the right thing in practice??
+                elif max_traversable_index in [3,4]:
+                    return 0 
+                elif max_traversable_index in [5,6,7]:
+                    return -1
+            elif ModelConfig.heuristic_type == "OCTS":
+                # x is a (1,6,3,244,244)
+                # Split image into 8 regions, act on most traversable.
+                # [0,4,5] ->  LEFT
+                # [1,2]   ->  STRAIGHT
+                # [3,6,7] ->  RIGHT
+                # .___________.
+                # |0 |1 |2 |3 |
+                # |  |  |  |  |
+                # |--|--|--|--|  (224 x 224) split into (112x56) patches
+                # |4 |5 |6 |7 |
+                # |  |  |  |  |
+                # ^^^^^^^^^^^^^
+                trav = self.trav_model(x[0][-1][None])[0][0] # trav(x) -> (1,2,224,224) -> (224,224)
+
+                regions=[]
+                [regions.append(reg) for r in trav.split(112,dim=0) for reg in r.split(56,dim=1)]
+
+                traversability_signals = [region[:,:].mean() for region in regions]
+
+                max_traversable_index = torch.argmax(torch.tensor(traversability_signals))
+                self.__traversability_target_region = max_traversable_index.item()
+
+                if max_traversable_index in [0, 4, 5]:
+                    return 1 # NOTE: This looks backwards but does the right thing in practice??
+                elif max_traversable_index in [1, 2]:
+                    return 0 
+                elif max_traversable_index in [3, 6, 7]:
+                    return -1
+            elif ModelConfig.heuristic_type == "BH-OCTS": #Bottom-Heavy Octants
+                # x is a (1,6,3,244,244)
+                # Split image into 8 regions, act on most traversable.
+                # [0,4,5] ->  LEFT
+                # [1,2]   ->  STRAIGHT
+                # [3,6,7] ->  RIGHT
+                # .___________.
+                # |0 |1 |2 |3 |
+                # |--|--|--|--|
+                # |4 |5 |6 |7 |  (224 x 224) split into (56x56)-top and (168x56)-bottom patches
+                # |  |  |  |  |
+                # |  |  |  |  |
+                # ^^^^^^^^^^^^^
+                trav = self.trav_model(x[0][-1][None])[0][0] # trav(x) -> (1,2,224,224) -> (224,224)
+
+                regions=[]
+                [regions.append(reg) for r in trav.split([56,168],dim=0) for reg in r.split(56,dim=1)]
+
+                traversability_signals = [region[:,:].mean() for region in regions]
+
+                max_traversable_index = torch.argmax(torch.tensor(traversability_signals))
+                self.__traversability_target_region = max_traversable_index.item()
+
+                if max_traversable_index in [0, 4, 5]:
+                    return 1 # NOTE: This looks backwards but does the right thing in practice??
+                elif max_traversable_index in [1, 2]:
+                    return 0 
+                elif max_traversable_index in [3, 6, 7]:
+                    return -1
+            elif ModelConfig.heuristic_type == "BHP-OCTS": #Bottom-Heavy Octants Pairwise
+                # x is a (1,6,3,244,244)
+                # Split image into 8 regions, act on most traversable PAIR
+                # [(0,1),(4,5)] -> [0,3] -> LEFT
+                # [(1,2),(5,6)] -> [1,4] -> STRAIGHT
+                # [(2,3),(6,7)] -> [2,5] -> RIGHT
+                # .___________.
+                # |0 |1 |2 |3 |
+                # |--|--|--|--|
+                # |4 |5 |6 |7 |  (224 x 224) split into (56x56)-top and (168x56)-bottom patches
+                # |  |  |  |  |
+                # |  |  |  |  |
+                # ^^^^^^^^^^^^^
+                trav = self.trav_model(x[0][-1][None])[0][0] # trav(x) -> (1,2,224,224) -> (224,224)
+
+                regions=[]
+                [regions.append(reg) for r in trav.split([56,168],dim=0) for reg in r.split(56,dim=1)]
+
+                solo_traversability_signals = [region[:,:].mean() for region in regions]
+
+                traversability_signals = []
+                [traversability_signals.append(solo_traversability_signals[4*r + c]+solo_traversability_signals[4*r + c+1]) for r in [0,1] for c in [0,1,2]]
+
+
+                max_traversable_index = torch.argmax(torch.tensor(traversability_signals))
+                self.__traversability_target_region = max_traversable_index.item()
+
+                if max_traversable_index in [0,3]:
+                    return 1 # NOTE: This looks backwards but does the right thing in practice??
+                elif max_traversable_index in [1, 4]:
+                    return 0 
+                elif max_traversable_index in [2,5]:
+                    return -1
+        
+        return action_fn
+
+                
 
     def discrete_action_model(self, model, theta_scale=.4):
         """
@@ -180,7 +315,7 @@ class AnymalRunner(object):
 
         # add callbacks (executes from BOTTOM FIRST, last-in-first-out):
         self._world.add_physics_callback("IsaacRunner_Physics", self.on_physics_step)
-        #self._world.add_physics_callback("inference", callback_fn = self.image_inference_callback)
+        self._world.add_physics_callback("inference", callback_fn = self.image_inference_callback)
         self._world.add_physics_callback("observe", callback_fn = self.save_image_callback)
         self._world.add_physics_callback("anymal_advance", callback_fn=self.main_physics_callback)
         #self._world.add_physics_callback("logging", callback_fn = self.logging_callback)
@@ -239,44 +374,16 @@ class AnymalRunner(object):
     __image_inference_callback_counter = 0
 
     def image_inference_callback(self, step_size):
-        if self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
+        if self._world.current_time_step_index % SimConfig.inference_callback_rate != 0 or self.lock > 0: 
             return
-        
+
         if len(self.robot_state.img_memory) < 6:
             return
-
         obs = torch.stack([self.clean_image_for_model(image) for image in self.robot_state.img_memory])
         obs = obs.to(SimConfig.device)
-
         theta = self.action_model(obs[None]) # expand dims because it should be batched 
         self._base_command = np.array([1.5, 0, theta])
         print(f'theta pred: {theta}')
-
-    
-
-    def mean_traversable_point_model(self, rgb_image, depth_image):
-        """
-        Go to a random traversable point
-        """
-
-        img, depth_clean = self.clean_image_for_model(rgb_image, depth_image)
-
-        cu_img = img.cuda()[None]
-        probs = self.model(cu_img)
-        mask = torch.argmax(probs[0], dim=0)
-        zero_indices = torch.nonzero(mask == 0)
-        
-
-        idx = torch.floor(torch.random(1) * len(zero_indices))
-        point = zero_indices[idx]
-        depth = depth_clean[math.floor(point[0]), math.floor(point[1])]
-        
-        intrinsics = self._anymal_direct.front_depth_camera.K.clone()
-        
-        world_loc = self.unproject(point, depth, intrinsics)
-
-        self.carrot = world_loc
-
 
     def save_image_callback(self, step_size):
         if self._world.current_time_step_index % SimConfig.inference_callback_rate != 0: 
@@ -295,15 +402,42 @@ class AnymalRunner(object):
             torch.save(rgb_image, path)
             self.obs_num+=1
 
-        if False:
+        else:
             img = self.clean_image_for_model(rgb_image)
 
+            stage_name = StageConfig.default_stage.split("/")[-1]
+
             cu_img = img.cuda()[None]
-            probs = self.model(cu_img)
+            probs = self.trav_model(cu_img)
             pred = torch.argmax(probs[0], dim=0).cpu()
+            
+            # Update Mask to show target square if Using Heuristic
+            if ModelConfig.model_type == 'heuristic':
+                if ModelConfig.heuristic_type == "COLS":
+                    col = self.__traversability_target_region
+                    img[1,:,28*col:28*(col+1)] += 0.25
+                elif ModelConfig.heuristic_type == "OCTS":
+                    row = self.__traversability_target_region // 4
+                    col = self.__traversability_target_region % 4
+                    img[1,112*row:112*(row+1),56*col:56*(col+1)] += 0.25
+                elif ModelConfig.heuristic_type == "BH-OCTS":
+                    row = self.__traversability_target_region // 4
+                    col = self.__traversability_target_region % 4
+                    if row == 0:
+                        img[1,:56,56*col:56*(col+1)] += 0.25
+                    else:
+                        img[1,56:,56*col:56*(col+1)] += 0.25
+                elif ModelConfig.heuristic_type == "BHP-OCTS":
+                    row = self.__traversability_target_region // 3
+                    col = self.__traversability_target_region % 3
+                    if row == 0:
+                        img[1,:56,56*col:56*(col+2)] += 0.25
+                    else:
+                        img[1,56:,56*col:56*(col+2)] += 0.25
 
             save_mask(img, pred, 'live_updates/live.png')
 
+            # W
             rgbt = torch.zeros((224,224,4))
             rgbt[:,:,:3] = img.permute(1,2,0)
             rgbt[:,:, 3] = pred
@@ -318,109 +452,26 @@ class AnymalRunner(object):
                 if not os.path.exists(F"image_command/{stage_name}"):
                     os.mkdir(F"image_command/{stage_name}")
             #torch.save(rgbt.detach(),F"image_command/{stage_name}/{num},{cmd}.pt" if StageConfig.default_stage != None else F"image_command/{num},{cmd}.pt")
-
-            print('Inference complete')
-
-
-    def image_and_proprio_callback(self, step_size):
-        """Processes image"""
-        self.last_image_ts = self._world.current_time_step_index
-
-        camera_parent = 'wide_angle_camera_front_camera'
-        use_for_training = True
-
-        if self._world.current_time_step_index % SimConfig.image_callback_rate != 0 or self.lock > 0:
-            return
-        
-        self._anymal_direct.front_depth_camera.buffer()
-        self._anymal_direct.front_depth_camera.save_latest_data()
-        image = self._anymal_direct.front_depth_camera.data.output
-        rgb_image = image['rgb'] 
-        #depth = image['distance_to_camera']
-
-        torch_image = torch.from_numpy(rgb_image).float().to(SimConfig.device)
-        torch_image = torch_image.permute(2, 0, 1)[:3] # change to channel first: (3, n, m)
-        torch_image_normalized = torch_image / 255.0
-        #torch_depth = torch.from_numpy(depth)[None].to(SimConfig.device)
-
-        # Get the intrinsics matrix and modify it according to crop/interpolations that will be performed 
-        K = self._anymal_direct.front_depth_camera.K.clone()
-        
-        torch_image_resized, intrinsics = crop_and_interpolate(torch_image_normalized, SimConfig.network_input_image_height, SimConfig.network_input_image_width, K)
-        #torch_depth_resized, _ = crop_and_interpolate(torch_depth, SimConfig.network_input_image_height, SimConfig.network_input_image_width, torch.eye(4,4)) # not using K here
-        intrinsics = intrinsics.unsqueeze(0).to(SimConfig.device)
-
-        # Get Poses
-        pose_base_in_world = transformation_matrix_of_pose(get_pose(self.anymal_prim_path + "/base"), ordering="xyzw").to(SimConfig.device)
-        T_PIW = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}"), ordering="wxyz").to(SimConfig.device)
-        T_CIP = transformation_matrix_of_pose(get_pose(f"{self.anymal_prim_path}/{camera_parent}/Camera"), ordering="wxyz").to(SimConfig.device)
-        T_CIW = T_PIW @ T_CIP @ torch.Tensor([[-1,0,0,0],[0,1,0,0],[0,0,-1,0],[0,0,0,1]]).to(device='cuda') 
- 
-        H = torch.IntTensor([SimConfig.network_input_image_height]).to(SimConfig.device)
-        W = torch.IntTensor([SimConfig.network_input_image_width]).to(SimConfig.device)
-
-
-    def log_data(self, **kwargs):
-        '''
-        Logs data from image_callback, according to SimConfig.logging_rate.
-
-        kwargs:
-            img: image to log
-
-            masked_conf: confidence masked over image
-
-            masked_trav: traversability masked over image
-
-            pose_cam_in_world: torch.tensor, saved as .pt
-
-            depth: torch.tensor, save as .pt
-
-            depth_np: numpy array, save as .png
-        '''
-        if 'masked_trav' in kwargs:
-            masked_trav = kwargs.get('masked_trav')
-        if 'masked_conf' in kwargs:
-            masked_conf = kwargs.get('masked_conf')
-
-        if 'masked_conf' in kwargs and 'masked_trav' in kwargs:
-            im1 = Image.fromarray(masked_trav)
-            im2 =Image.fromarray(masked_conf) 
-            both = get_concat_h(im1, im2)
-            both.save(f'live.jpg') # show real time masked traversability
-
-        if (self._world.current_time_step_index // SimConfig.image_callback_rate) % SimConfig.logging_rate != 0:
-            return
-    
-        i = self._world.current_time_step_index // SimConfig.image_callback_rate
-        relative_path = os.path.join(os.getcwd(),self.log_dir)
-
-        if not os.path.exists(relative_path):
-            print('making dir')
-            os.mkdir(relative_path)
-        print(relative_path)
-        if 'img' in kwargs:
-            ground_truth = Image.fromarray(kwargs.get('img'))
-            ground_truth.save(os.path.join(relative_path, f'img_{i}.jpg')) 
-        if 'masked_conf' in kwargs and 'masked_trav' in kwargs:
-            both.save(os.path.join(relative_path,f'masks_{i}.jpg'))
-        if 'pose_cam_in_world' in kwargs:
-            pose_cam_in_world = kwargs.get('pose_cam_in_world')
-            torch.save(pose_cam_in_world, os.path.join(relative_path,f'cam_loc_{i}.pt'))
-        # if 'depth' in kwargs:
-        #     depth = kwargs.get('depth')
-        #     torch.save(depth, os.path.join(relative_path,f'depth_{i}.pt'))
-        # if 'depth_np' in kwargs:
-        #     depth = kwargs.get('depth_np')
-        #     mask = np.isinf(depth)
-        #     depth[mask] = 0
-        #     depth = depth / np.max(depth)
-        #     depth[mask] = 1
-        #     depth *= 255
-        #     depth = depth.astype('uint8')
-
-        #     image = Image.fromarray(depth)
             
-        #     image.save(os.path.join(relative_path, f'depth_img_{i}.jpg'))
+            self.obs_num += 1
+
+            # Track Pathing Information
+            if not "GLASS" in stage_name:
+                if not os.path.exists("rollout_paths"):
+                    os.mkdir(F"rollout_paths")
+                if not os.path.exists(F"rollout_paths/{stage_name}"):
+                    os.mkdir(F"rollout_paths/{stage_name}")
+                
+                rollout_kind = ModelConfig.model_type
+                if rollout_kind == "heuristic":
+                    rollout_kind += F"_{ModelConfig.heuristic_type}"
+                x,y,z = get_pose(self.anymal_prim_path + '/base')[:3]
+                with open(F"rollout_paths/{stage_name}/{rollout_kind}.dcsv",'a') as file:
+                    file.write(F"{self.rollout_num},,{self.obs_num},,{x},{y},{z}\n")
+
+                #self.respawn_anymal()
+                print(F"Rollout: {self.reset_count}/{SimConfig.max_resets}")
+            print('Inference complete')
 
 
     # NOTE: Required for raytracing calls.
@@ -472,15 +523,17 @@ class AnymalRunner(object):
                 print(self._base_command)
             elif event.input.name == "R":
                 self.respawn_anymal(SimConfig.robot_spawn_location)
-                if self.recording:
-                    self.rollout_num += 1
-                    self.obs_num = 0
+                #if self.recording: #NOTE: For mapping out rollouts we still need these to increment.
+                self.rollout_num += 1
+                self.obs_num = 0
             elif event.input.name == "P":
                 self.recording = not self.recording
                 print(f"Recording: {self.recording}")
             elif event.input.name == "G":
                 self.planner.random_new_goal()
-
+            elif event.input.name == "Q": #
+                self.quit_and_plot_rollouts()
+                
 
         elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
             # on release, the command is decremented
@@ -499,18 +552,20 @@ class AnymalRunner(object):
         # watch the anymal itself position before and after reset
 
         self.robot_state.reset()
-        self.lock_proprio(250) # resself._input_keyboard_mapping
+        self._base_command = np.array([0,0,0])
+        self.lock_n_steps(100) # allow the robot to get settled before doing anything else
         # rotate robot to face towards goal node from the start
         #theta = (360 + 180 * np.arctan2(self.planner.goal[1], self.planner.goal[0]) / np.pi) % 360
-        theta = 90
-        
-        transform(F"{self.anymal_prim_path}/base", translation=[loc[0],loc[1]+ SimConfig.robot_height,loc[2] ], rotation=SimConfig.robot_spawn_rotation)
+        spawn_angle_offset = 0 #2*(np.random.random()-0.5)*60
+        rx,ry,rz = SimConfig.robot_spawn_rotation
+        spawn_angle = [rx, ry, rz+spawn_angle_offset]
+        transform(F"{self.anymal_prim_path}/base", translation=[loc[0], loc[1], loc[2] + SimConfig.robot_height], rotation=spawn_angle)
 
         self.planner.calculate_path(self.robot_state.get_xyt_pose())
         self.reset_count += 1
         print(f'RESET #{self.reset_count}')
 
-    def lock_proprio(self, steps):
+    def lock_n_steps(self, steps):
         self.lock = steps
 
     def clean_image_for_model(self, rgb_image, depth_image = None):
@@ -554,6 +609,41 @@ class AnymalRunner(object):
         T_CIW = T_PIW @ T_CIP @ torch.Tensor([[-1,0,0,0],[0,1,0,0],[0,0,-1,0],[0,0,0,1]]).to(device='cuda') 
         return T_CIW
 
+    def quit_and_plot_rollouts(self):
+        def hsv_to_rgb(h,s,v) -> tuple:
+            if s:
+                if h == 1.0: h = 0.0
+                i = int(h*6.0); f = h*6.0 - i
+                w = v * (1.0 - s)
+                q = v * (1.0 - s * f)
+                t = v * (1.0 - s * (1.0 - f))
+                if i==0: return (v, t, w)
+                if i==1: return (q, v, w)
+                if i==2: return (w, v, t)
+                if i==3: return (w, q, v)
+                if i==4: return (t, w, v)
+                if i==5: return (v, w, q)
+            else: return (v, v, v)
+
+        stage_name = StageConfig.default_stage.split("/")[-1]    
+        #stage_name = "Lincolns_Inn_Chapel_Undercroft.usd"
+        rollout_kind = ModelConfig.model_type
+        rollout_kind += F"_{ModelConfig.heuristic_type}"
+        #rollout_filepath = "/home/pcgta/Documents/cs6670finalproject/anymalrunner/rollout_paths/Lake_Shore_Drone_Scan.usd/__saved_lakeheuristic_BH-OCTS.dcsv"
+        create_scope("/World/Data")
+        with open(rollout_filepath,'r') as file:
+            max_color = 1
+            for line in file.readlines():
+                color = int(line.split(",,")[0])
+                if color > max_color:
+                    max_color = color
+        with open(rollout_filepath,'r') as file:       
+            for line in file.readlines():
+                color = int(line.split(",,")[0])
+                x_str, y_str, z_str = line.split(",,")[-1].split(",")
+                x,y,z = float(x_str), float(y_str), float(z_str)
+                create_sphere([x,y,z],radius=0.15,parent_prim_path="/World/Data",applier=apply_color_to_prim((1,0,0)))
+
 def main():
     """Parse arguments and instantiate/run Orbit."""
     physics_dt = 1 / 200.0
@@ -569,3 +659,38 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+    # def log_data(self, **kwargs):
+    #     '''
+    #     Logs data from image_callback, according to SimConfig.logging_rate.
+
+    #     kwargs:
+    #         img: image to log
+
+    #         masked_conf: confidence masked over image
+
+    #         masked_trav: traversability masked over image
+
+    #         pose_cam_in_world: torch.tensor, saved as .pt
+
+    #         depth: torch.tensor, save as .pt
+
+    #         depth_np: numpy array, save as .png
+    #     '''
+    #     if 'masked_trav' in kwargs:
+    #         masked_trav = kwargs.get('masked_trav')
+    #     if 'masked_conf' in kwargs:
+    #         masked_conf = kwargs.get('masked_conf')
+
+    #     if 'masked_conf' in kwargs and 'masked_trav' in kwargs:
+    #         im1 = Image.fromarray(masked_trav)
+    #         im2 =Image.fromarray(masked_conf) 
+    #         both = get_concat_h(im1, im2)
+    #         both.save(f'live.jpg') # show real time masked traversability
+
+    #     if (self._world.current_time_step_index // SimConfig.image_callback_rate) % SimConfig.logging_rate != 0:
+    #         return
+    
+    #     i = self._world.current_time_step_index // SimConfig.image_callback_rate
+    #     relative_path = os.path.join(os.getcwd(),self.log_dir)
